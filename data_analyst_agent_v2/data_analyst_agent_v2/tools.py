@@ -35,6 +35,7 @@ class VIZ_INPUT(BaseModel):
 
 
 class MainRouter(BaseModel):
+    model_config = ConfigDict(extra = 'ignore')
     intent: Literal['SQL_ONLY', 'SQL_AND_VIZ',  'CLARITY'] = Field(description = """Intent Extracted from current user query.
                                                                   - 'SQL_ONLY': if intent is only to generate sql query from user query.
                                                                   - 'SQL_AND_VIZ': if user intent is to generate sql and visulaize data in graph or plot form.
@@ -98,24 +99,16 @@ class MainRouter(BaseModel):
         - unclear column
         - ambiguous metric
 
-        If query is clear → set to None.
+        If query is clear → set to "Cleared".
         """,
         default = None
     ),
     MAX_RETRIES: int = 3,
     MAX_VIZ_RETRIES: int = 3,
-    assumptions: Optional[str] = Field(
-        description = "assumption for final generated sql query"
-    ),
-    final_query_status: Literal['SUCCESS', 'FAIL_NEEDS_CLARIFICATION', 'FAIL_MAX_RETRIES'] = Field(
-        description = 'status of generated sql query'
-    ),
-    VIZ_STATUS: Literal['SUCCESS','FAIL_MAX_RETRIES'] = Field(
-        description = """Status of visulaization agent"""
-    ),
-    VIZ_artifact: Optional[str] = Field(
-        description = """Arifact ID of visualization""", default = None
-    )
+    assumptions: Optional[str] = Field(description = "assumption for final generated sql query"),
+    final_query_status: Literal['SUCCESS', 'FAIL_NEEDS_CLARIFICATION', 'FAIL_MAX_RETRIES'] = Field(description = 'status of generated sql query'),
+    VIZ_STATUS: Literal['SUCCESS','FAIL_MAX_RETRIES'] = Field(description = """Status of visulaization agent"""),
+    VIZ_artifact: Optional[str] = Field(description = """Arifact ID of visualization. It should be json file""", default = None)
 
     @field_validator('table_schema_artifact')
     @classmethod
@@ -123,17 +116,10 @@ class MainRouter(BaseModel):
         if not v.lower().endswith('.json'):
             raise ValueError("database_schema artifact id not ends with .json")
         return v
-    
-    @field_validator('VIZ_artifact')
-    @classmethod
-    def viz_artifact_check(cls, v: str) -> str:
-        if not v.lower().endswith('.png'):
-            raise ValueError("Artifact ID of visualization is not ends with .png")
-        return v
 
 
 
-async def set_state(tool_context: ToolContext, updates: MainRouter) -> dict:
+async def set_state(tool_context: ToolContext, updates: MainRouter):
     """
     Update the application state with specific allowed keys.
     
@@ -144,11 +130,11 @@ async def set_state(tool_context: ToolContext, updates: MainRouter) -> dict:
         if not isinstance(updates, MainRouter):
             updates = MainRouter.model_validate(updates)
         
-        data_to_apply = updates.model_dump(exclude_unset=True)
-
+        data_to_apply = updates.model_dump(exclude_unset=True, exclude_none = True)
+        
         for k, v in data_to_apply.items():
             tool_context.state[k] = v
-        
+    
         return {"status": "success",
             "updated_keys": f"{",".join(list(data_to_apply.keys()))}"}
     
@@ -195,16 +181,24 @@ async def after_tool_artifact_save(tool: BaseTool, args: dict[str, Any], tool_co
             return tool_response
     
     if tool_name == 'execute_graph':
-        tool_result = json.loads(tool_response['content'][0]['text'])
-        if tool_result['status'].lower() == 'success':
+        tool_result = json.loads(tool_response['content'][0].get('text'))
+        if tool_result.get('status') == 'SUCCESS':
             
-            report_artifact = types.Part.from_bytes(data = pio.from_json(tool_result['data']).to_image(format = 'png', width = 400, height = 300), 
-                                                mime_type = "image/png")
-            version = await tool_context.save_artifact(filename = "visialize_data.png", artifact = report_artifact)
-            tool_result['data'] = f"[User stored Artifact] Artifact filename for generated for data visualization : plotly_visualization.png"
+            fig_json = tool_result.get('data')
+
+            report_artifact = pio.to_html(pio.from_json(fig_json), full_html = True, include_plotlyjs = 'cdn')
+            filename = 'plotly_graph.html'
+
+            part = types.Part.from_bytes(data = report_artifact.encode('utf-8'), mime_type = 'text/html')
+            version = await tool_context.save_artifact(filename = filename, artifact = part)
+
+            tool_context.state['VIZ_artifact'] = filename
+            tool_result['data'] = '[Plotly Graph Artifact VIX_artifact]: ploty graph has been generated and saved as HTML artifact'
+            tool_result['artifact'] = {'filename': filename, 'version': version, 'mime_type': 'text/html'}
+        
             return tool_result
         else:
-            return tool_result
+            return tool_response
 
     return tool_response
 
